@@ -6,6 +6,7 @@ import (
 	"http"
 	"io/ioutil"
 	"log"
+	"os"
 	"regexp"
 	"sync"
 	"time"
@@ -14,18 +15,73 @@ import (
 var flagBase *string = flag.String("base", "http://www.picpix.com/kelly",
 	"e.g. http://www.picpix.com/username (no trailing slash)")
 
+var flagDest *string = flag.String("dest", "/home/bradfitz/backup/picpix/kelly", "Destination backup root")
+
 var galleryMutex sync.Mutex
 var galleryMap map[string]*Gallery = make(map[string]*Gallery)
 
 // Only allow 10 fetches at a time.
 var fetchGate chan bool = make(chan bool, 10)
 
+var errorMutex sync.Mutex
+var errors []string = make([]string, 0)
+
+func addError(msg string) {
+	errorMutex.Lock()
+	defer errorMutex.Unlock()
+	errors = append(errors, msg)
+	log.Printf("ERROR: %s", msg)
+}
+
+func startFetch() {
+	// Buffered channel, will block if too many in-flight.
+	fetchGate <- true 
+}
+
+func endFetch() {
+	<-fetchGate
+}
+
 type Gallery struct {
 	key  string
 }
 
+func (g *Gallery) GalleryXmlUrl() string {
+	return fmt.Sprintf("%s/gallery/%s.xml", *flagBase, g.key)
+}
+
 func (g *Gallery) Fetch() {
+	startFetch()
+	defer endFetch()
+
+	galXmlFilename := fmt.Sprintf("%s/gallery-%s.xml", *flagDest, g.key)
+	fi, statErr := os.Stat(galXmlFilename)
+	if statErr != nil || fi.Size == 0 {
+		res, _, err := http.Get(g.GalleryXmlUrl())
+		if err != nil {
+			addError(fmt.Sprintf("Error fetching %s: %v", g.GalleryXmlUrl(), err))
+			return
+		}
+		defer res.Body.Close()
+
+		galXml, err := ioutil.ReadAll(res.Body)
+		if err != nil {
+			addError(fmt.Sprintf("Error reading XML from %s: %v", g.GalleryXmlUrl(), err))
+			return
+		}
+
+		err = ioutil.WriteFile(galXmlFilename, galXml, 0600)
+ 		if err != nil {
+			addError(fmt.Sprintf("Error writing file %s: %v", galXmlFilename, err))
+			return
+		}
+	}
 	
+	fetchPhotosInGallery(galXmlFilename)
+}
+
+func fetchPhotosInGallery(filename string) {
+	log.Printf("Need to read: %s", filename)
 }
 
 func knownGalleries() int {
