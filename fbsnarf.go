@@ -1,3 +1,15 @@
+// Copyright 2010 Brad Fitzpatrick. All rights reserved. See LICENSE file.
+//
+// This program mirrors FotoBilder galleries & pictures.  FotoBilder
+// is the software the runs LiveJournal's photo galleries, and
+// previously ran picpix.com, which is now apparently shutting down.
+//
+// This tool fetches public galleries & photos only when passwords
+// aren't handy.
+//
+// If you have the passwords, use fotoup.pl and its --backup mode,
+// which uses the authenticated API.
+
 package main
 
 import (
@@ -19,6 +31,7 @@ var flagBase *string = flag.String("base", "http://www.picpix.com/kelly",
 var flagDest *string = flag.String("dest", "/home/bradfitz/backup/picpix/kelly", "Destination backup root")
 
 var flagSloppy *bool = flag.Bool("sloppy", false, "Continue on errors")
+var flagMaxNetwork *int = flag.Int("concurrency", 20, "Max concurrent requests")
 
 var galleryMutex sync.Mutex
 var galleryMap map[string]*Gallery = make(map[string]*Gallery)
@@ -26,10 +39,11 @@ var galleryMap map[string]*Gallery = make(map[string]*Gallery)
 var picMutex sync.Mutex
 var picMap map[string]*MediaSetItem = make(map[string]*MediaSetItem)
 
-// Only allow 10 network fetches at a time.
-var fetchGate chan bool = make(chan bool, 10)
+var networkOpGate chan bool
 
-var localOpGate chan bool = make(chan bool, 100)
+// Consult ulimit -n; you may have to up your
+// /etc/security/limits.conf's nofile.
+var localOpGate chan bool = make(chan bool, 10000)
 
 var opsMutex sync.Mutex
 var opsInFlight int
@@ -64,7 +78,7 @@ func NewLocalOperation() Operation {
 	opsMutex.Lock()
 	opsInFlight++
 	opsMutex.Unlock()
-	localOpGate <- true  // buffer-limited, may/should block
+	localOpGate <- true // buffer-limited, may/should block
 	return LocalOperation(0)
 }
 
@@ -72,27 +86,27 @@ func NewNetworkOperation() Operation {
 	opsMutex.Lock()
 	opsInFlight++
 	opsMutex.Unlock()
-        fetchGate <- true
+	networkOpGate <- true
 	return NetworkOperation(0)
 }
 
 func (o LocalOperation) Done() {
 	<-localOpGate
 	opsMutex.Lock()
-        defer opsMutex.Unlock()
+	defer opsMutex.Unlock()
 	opsInFlight--
 }
 
 func (o NetworkOperation) Done() {
-	<-fetchGate
+	<-networkOpGate
 	opsMutex.Lock()
-        defer opsMutex.Unlock()
+	defer opsMutex.Unlock()
 	opsInFlight--
 }
 
 func OperationsInFlight() int {
 	opsMutex.Lock()
-        defer opsMutex.Unlock()
+	defer opsMutex.Unlock()
 	return opsInFlight
 }
 
@@ -100,7 +114,7 @@ func fetchUrlToFile(url, filename string, expectedSize int64) bool {
 	fi, statErr := os.Stat(filename)
 	if statErr == nil &&
 		(expectedSize == -1 && fi.Size > 0 ||
-		expectedSize == fi.Size) {
+			expectedSize == fi.Size) {
 		// TODO: re-fetch mode?
 		return true
 	}
@@ -122,7 +136,7 @@ func fetchUrlToFile(url, filename string, expectedSize int64) bool {
 	}
 
 	err = ioutil.WriteFile(filename, fileBytes, 0600)
- 	if err != nil {
+	if err != nil {
 		addError(fmt.Sprintf("Error writing file %s: %v", filename, err))
 		return false
 	}
@@ -130,7 +144,7 @@ func fetchUrlToFile(url, filename string, expectedSize int64) bool {
 }
 
 type Gallery struct {
-	key  string
+	key string
 }
 
 func (g *Gallery) XmlUrl() string {
@@ -148,37 +162,37 @@ func (g *Gallery) Fetch(op Operation) {
 
 type DigestInfo struct {
 	XMLName xml.Name "digest"
-	Type  string "attr"
-	Value string "chardata"
+	Type    string   "attr"
+	Value   string   "chardata"
 }
 
 type MediaFile struct {
 	XMLName xml.Name "file"
-	Digest DigestInfo
-	Mime string
-	Width int
-	Height int
-	Bytes int64
-	Url string  // the raw URL
+	Digest  DigestInfo
+	Mime    string
+	Width   int
+	Height  int
+	Bytes   int64
+	Url     string // the raw URL
 }
 
 type MediaSetItem struct {
-	XMLName xml.Name "mediaSetItem"
-	Title string
+	XMLName     xml.Name "mediaSetItem"
+	Title       string
 	Description string
-	InfoURL string  // the xml URL
-	File MediaFile
+	InfoURL     string // the xml URL
+	File        MediaFile
 
 	// Not in the XML:
-	key string  // the 8 chars
+	key string // the 8 chars
 }
 
 func (p *MediaSetItem) XmlUrl() string {
-        return fmt.Sprintf("%s/pic/%s.xml", *flagBase, p.key)
+	return fmt.Sprintf("%s/pic/%s.xml", *flagBase, p.key)
 }
 
 func (p *MediaSetItem) BlobUrl() string {
-        return fmt.Sprintf("%s/pic/%s", *flagBase, p.key)
+	return fmt.Sprintf("%s/pic/%s", *flagBase, p.key)
 }
 
 func (p *MediaSetItem) XmlBackupFilename() string {
@@ -199,7 +213,7 @@ func (p *MediaSetItem) BlobBackupFilename() string {
 }
 
 func (p *MediaSetItem) Fetch(op Operation) {
-        defer op.Done()
+	defer op.Done()
 	if !fetchUrlToFile(p.XmlUrl(), p.XmlBackupFilename(), -1) {
 		return
 	}
@@ -211,25 +225,25 @@ func (p *MediaSetItem) Fetch(op Operation) {
 }
 
 type MediaSetItemsWrapper struct {
-	XMLName xml.Name "mediaSetItems"
+	XMLName      xml.Name "mediaSetItems"
 	MediaSetItem []MediaSetItem
 }
 
 type LinkedFromSet struct {
 	XMLName xml.Name "linkedFrom"
-	InfoURL []string   // xml gallery URLs of 'parent' galleries (not a DAG)
+	InfoURL []string // xml gallery URLs of 'parent' galleries (not a DAG)
 }
 
 type LinkedToSet struct {
 	XMLName xml.Name "linkedTo"
-	InfoURL []string   // xml gallery URLs of 'children' galleries (not a DAG)
+	InfoURL []string // xml gallery URLs of 'children' galleries (not a DAG)
 }
 
 type MediaSet struct {
-	XMLName xml.Name "mediaSet"
+	XMLName       xml.Name "mediaSet"
 	MediaSetItems MediaSetItemsWrapper
-	LinkedFrom  LinkedFromSet
-	LinkedTo    LinkedToSet
+	LinkedFrom    LinkedFromSet
+	LinkedTo      LinkedToSet
 }
 
 func fetchPhotosInGallery(filename string, op Operation) {
@@ -244,9 +258,9 @@ func fetchPhotosInGallery(filename string, op Operation) {
 	mediaSet := new(MediaSet)
 	err = xml.Unmarshal(f, mediaSet)
 	if err != nil {
-                addError(fmt.Sprintf("Failed to unmarshal %s: %v", filename, err))
-                return
-        }
+		addError(fmt.Sprintf("Failed to unmarshal %s: %v", filename, err))
+		return
+	}
 
 	// Learn about new galleries, potentially?
 	for _, url := range mediaSet.LinkedFrom.InfoURL {
@@ -335,6 +349,8 @@ func fetchGalleryPage(page int) {
 func main() {
 	flag.Parse()
 	log.Printf("Starting.")
+
+	networkOpGate = make(chan bool, *flagMaxNetwork)
 
 	page := 1
 	for {
