@@ -27,38 +27,38 @@ import (
 
 import _ "http/pprof"
 
-var flagBase *string = flag.String("base", "",
+var flagBase = flag.String("base", "",
 	"e.g. http://www.picpix.com/username (no trailing slash)")
 
-var flagDest *string = flag.String("dest", "", "Destination backup root")
+var flagDest = flag.String("dest", "", "Destination backup root")
 
-var flagSloppy *bool = flag.Bool("sloppy", false, "Continue on errors")
-var flagMaxNetwork *int = flag.Int("concurrency", 20, "Max concurrent requests")
+var flagSloppy = flag.Bool("sloppy", false, "Continue on errors")
+var flagMaxNetwork = flag.Int("concurrency", 20, "Max concurrent requests")
 
-var flagProfile *string = flag.String("profile", "",
+var flagProfile = flag.String("profile", "",
 	"the listen address to run a webserver for profiling; empty to leave disabled")
 
 var galleryMutex sync.Mutex
-var galleryMap map[string]*Gallery = make(map[string]*Gallery)
+var galleryMap = make(map[string]*Gallery)
 
 var picMutex sync.Mutex
-var picMap map[string]*MediaSetItem = make(map[string]*MediaSetItem)
+var picMap = make(map[string]*MediaSetItem)
 
 var networkOpGate chan bool
 
 // Consult ulimit -n; you may have to up your
 // /etc/security/limits.conf's nofile.
-var localOpGate chan bool = make(chan bool, 10000)
+var localOpGate = make(chan bool, 10000)
 
 var opsMutex sync.Mutex
 var opsInFlight int
 
 var errorMutex sync.Mutex
-var errors []string = make([]string, 0)
+var errors = make([]string, 0)
 
-var galleryPattern *regexp.Regexp = regexp.MustCompile(
+var galleryPattern = regexp.MustCompile(
 	"/gallery/([0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z])")
-var picPattern *regexp.Regexp = regexp.MustCompile(
+var picPattern = regexp.MustCompile(
 	"/pic/([0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z])")
 
 func addError(msg string) {
