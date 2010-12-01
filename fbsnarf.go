@@ -24,7 +24,7 @@ var galleryMutex sync.Mutex
 var galleryMap map[string]*Gallery = make(map[string]*Gallery)
 
 var picMutex sync.Mutex
-var picMap map[string]*Pic = make(map[string]*Pic)
+var picMap map[string]*MediaSetItem = make(map[string]*MediaSetItem)
 
 // Only allow 10 network fetches at a time.
 var fetchGate chan bool = make(chan bool, 10)
@@ -96,9 +96,11 @@ func OperationsInFlight() int {
 	return opsInFlight
 }
 
-func fetchUrlToFile(url, filename string) bool {
+func fetchUrlToFile(url, filename string, expectedSize int64) bool {
 	fi, statErr := os.Stat(filename)
-	if statErr == nil && fi.Size > 0 {
+	if statErr == nil &&
+		(expectedSize == -1 && fi.Size > 0 ||
+		expectedSize == fi.Size) {
 		// TODO: re-fetch mode?
 		return true
 	}
@@ -139,33 +141,9 @@ func (g *Gallery) Fetch(op Operation) {
 	defer op.Done()
 
 	galXmlFilename := fmt.Sprintf("%s/gallery-%s.xml", *flagDest, g.key)
-	if fetchUrlToFile(g.XmlUrl(), galXmlFilename) {
+	if fetchUrlToFile(g.XmlUrl(), galXmlFilename, -1) {
 		go fetchPhotosInGallery(galXmlFilename, NewLocalOperation())
 	}
-}
-
-type Pic struct {
-	key  string
-}
-
-func (p *Pic) XmlUrl() string {
-        return fmt.Sprintf("%s/pic/%s.xml", *flagBase, p.key)
-}
-
-func (p *Pic) BlobUrl() string {
-        return fmt.Sprintf("%s/pic/%s", *flagBase, p.key)
-}
-
-func (p *Pic) XmlBackupFilename() string {
-	return fmt.Sprintf("%s/pic-%s.xml", *flagDest, p.key)
-}
-
-func (p *Pic) Fetch(op Operation) {
-        defer op.Done()
-	if !fetchUrlToFile(p.XmlUrl(), p.XmlBackupFilename()) {
-		return
-	}
-	
 }
 
 type DigestInfo struct {
@@ -180,7 +158,7 @@ type MediaFile struct {
 	Mime string
 	Width int
 	Height int
-	Bytes int
+	Bytes int64
 	Url string  // the raw URL
 }
 
@@ -190,6 +168,46 @@ type MediaSetItem struct {
 	Description string
 	InfoURL string  // the xml URL
 	File MediaFile
+
+	// Not in the XML:
+	key string  // the 8 chars
+}
+
+func (p *MediaSetItem) XmlUrl() string {
+        return fmt.Sprintf("%s/pic/%s.xml", *flagBase, p.key)
+}
+
+func (p *MediaSetItem) BlobUrl() string {
+        return fmt.Sprintf("%s/pic/%s", *flagBase, p.key)
+}
+
+func (p *MediaSetItem) XmlBackupFilename() string {
+	return fmt.Sprintf("%s/pic-%s.xml", *flagDest, p.key)
+}
+
+func (p *MediaSetItem) BlobBackupFilename() string {
+	var ext string
+	switch p.File.Mime {
+	case "image/jpeg":
+		ext = "jpg"
+	case "image/png":
+		ext = "png"
+	case "image/gif":
+		ext = "gif"
+	}
+	return fmt.Sprintf("%s/pic-%s.%s", *flagDest, p.key, ext)
+}
+
+func (p *MediaSetItem) Fetch(op Operation) {
+        defer op.Done()
+	if !fetchUrlToFile(p.XmlUrl(), p.XmlBackupFilename(), -1) {
+		return
+	}
+
+	if p.File.Bytes <= 0 {
+		panic("expected file to have some known file size")
+	}
+	fetchUrlToFile(p.BlobUrl(), p.BlobBackupFilename(), p.File.Bytes)
 }
 
 type MediaSetItemsWrapper struct {
@@ -240,8 +258,9 @@ func fetchPhotosInGallery(filename string, op Operation) {
 
 	//log.Printf("Parse of %s is: %q", filename, mediaSet)
 	for _, item := range mediaSet.MediaSetItems.MediaSetItem {
+		item.key = findKey(item.InfoURL, picPattern)
 		//log.Printf("   pic: %s", item.InfoURL)
-		notePhoto(item.InfoURL)
+		notePhoto(&item)
 	}
 }
 
@@ -279,15 +298,13 @@ func noteGallery(keyOrUrl string) {
 	go gallery.Fetch(NewLocalOperation())
 }
 
-func notePhoto(keyOrUrl string) {
-	key := findKey(keyOrUrl, picPattern)
+func notePhoto(pic *MediaSetItem) {
 	picMutex.Lock()
 	defer picMutex.Unlock()
-	if _, known := picMap[key]; known {
+	if _, known := picMap[pic.key]; known {
 		return
 	}
-	pic := &Pic{key}
-	picMap[key] = pic
+	picMap[pic.key] = pic
 	log.Printf("Photo: %s", pic.XmlUrl())
 	go pic.Fetch(NewLocalOperation())
 }
