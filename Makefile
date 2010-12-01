@@ -1,6 +1,6 @@
 include $(GOROOT)/src/Make.inc
 
-TARG=fbsnarf
-GOFILES=fbsnarf.go
+TARG=spiegel
+GOFILES=spiegel.go
 
 include $(GOROOT)/src/Make.cmd
