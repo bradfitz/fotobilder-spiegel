@@ -10,12 +10,15 @@ import (
 	"regexp"
 	"sync"
 	"time"
+	"xml"
 )
 
 var flagBase *string = flag.String("base", "http://www.picpix.com/kelly",
 	"e.g. http://www.picpix.com/username (no trailing slash)")
 
 var flagDest *string = flag.String("dest", "/home/bradfitz/backup/picpix/kelly", "Destination backup root")
+
+var flagSloppy *bool = flag.Bool("sloppy", false, "Continue on errors")
 
 var galleryMutex sync.Mutex
 var galleryMap map[string]*Gallery = make(map[string]*Gallery)
@@ -26,11 +29,18 @@ var fetchGate chan bool = make(chan bool, 10)
 var errorMutex sync.Mutex
 var errors []string = make([]string, 0)
 
+var galleryPattern *regexp.Regexp = regexp.MustCompile(
+	"/gallery/([0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z])")
+
 func addError(msg string) {
 	errorMutex.Lock()
 	defer errorMutex.Unlock()
 	errors = append(errors, msg)
-	log.Printf("ERROR: %s", msg)
+	if *flagSloppy {
+		log.Printf("ERROR: %s", msg)
+	} else {
+		log.Exitf("ERROR: %s", msg)
+	}
 }
 
 func startFetch() {
@@ -80,8 +90,78 @@ func (g *Gallery) Fetch() {
 	fetchPhotosInGallery(galXmlFilename)
 }
 
+type DigestInfo struct {
+	XMLName xml.Name "digest"
+	Type  string "attr"
+	Value string "chardata"
+}
+
+type MediaFile struct {
+	XMLName xml.Name "file"
+	Digest DigestInfo
+	Mime string
+	Width int
+	Height int
+	Bytes int
+	Url string  // the raw URL
+}
+
+type MediaSetItem struct {
+	XMLName xml.Name "mediaSetItem"
+	Title string
+	Description string
+	InfoURL string  // the xml URL
+	File MediaFile
+}
+
+type MediaSetItemsWrapper struct {
+	XMLName xml.Name "mediaSetItems"
+	MediaSetItem []MediaSetItem
+}
+
+type LinkedFromSet struct {
+	XMLName xml.Name "linkedFrom"
+	InfoURL []string   // xml gallery URLs of 'parent' galleries (not a DAG)
+}
+
+type LinkedToSet struct {
+	XMLName xml.Name "linkedTo"
+	InfoURL []string   // xml gallery URLs of 'children' galleries (not a DAG)
+}
+
+type MediaSet struct {
+	XMLName xml.Name "mediaSet"
+	MediaSetItems MediaSetItemsWrapper
+	LinkedFrom  LinkedFromSet
+	LinkedTo    LinkedToSet
+}
+
 func fetchPhotosInGallery(filename string) {
-	log.Printf("Need to read: %s", filename)
+	f, err := os.Open(filename, os.O_RDONLY, 0)
+	if err != nil {
+		addError(fmt.Sprintf("Failed to open %s: %v", filename, err))
+		return
+	}
+	defer f.Close()
+	mediaSet := new(MediaSet)
+	err = xml.Unmarshal(f, mediaSet)
+	if err != nil {
+                addError(fmt.Sprintf("Failed to unmarshal %s: %v", filename, err))
+                return
+        }
+
+	// Learn about new galleries, potentially?
+	for _, url := range mediaSet.LinkedFrom.InfoURL {
+		noteGallery(url)
+	}
+	for _, url := range mediaSet.LinkedTo.InfoURL {
+		noteGallery(url)
+	}
+
+	log.Printf("Parse of %s is: %q", filename, mediaSet)
+	for _, item := range mediaSet.MediaSetItems.MediaSetItem {
+		log.Printf("   pic: %s", item.InfoURL)
+	}
 }
 
 func knownGalleries() int {
@@ -90,7 +170,20 @@ func knownGalleries() int {
 	return len(galleryMap)
 }
 
-func noteGallery(key string) {
+func noteGallery(keyOrUrl string) {
+	var key string
+
+	if len(keyOrUrl) == 8 {
+		key = keyOrUrl
+	} else {
+		matches := galleryPattern.FindAllStringSubmatch(keyOrUrl, -1)
+		if len(matches) == 1 {
+			key = matches[0][1]
+		} else {
+			addError("Bogus noted gallery: " + key)
+			return
+		}
+	}
 	galleryMutex.Lock()
 	defer galleryMutex.Unlock()
 	if _, known := galleryMap[key]; known {
@@ -118,8 +211,7 @@ func fetchGalleryPage(page int) {
 	html := string(htmlBytes)
 	log.Printf("read %d bytes", len(html))
 
-	rx := regexp.MustCompile("/gallery/([0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z])")
-	matches := rx.FindAllStringSubmatch(html, -1)
+	matches := galleryPattern.FindAllStringSubmatch(html, -1)
 	log.Printf("Matched: %q", matches)
 	for _, match := range matches {
 		noteGallery(match[1])
