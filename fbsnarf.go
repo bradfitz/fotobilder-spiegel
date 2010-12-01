@@ -23,8 +23,13 @@ var flagSloppy *bool = flag.Bool("sloppy", false, "Continue on errors")
 var galleryMutex sync.Mutex
 var galleryMap map[string]*Gallery = make(map[string]*Gallery)
 
-// Only allow 10 fetches at a time.
+var picMutex sync.Mutex
+var picMap map[string]*Pic = make(map[string]*Pic)
+
+// Only allow 10 network fetches at a time.
 var fetchGate chan bool = make(chan bool, 10)
+
+var localOpGate chan bool = make(chan bool, 100)
 
 var opsMutex sync.Mutex
 var opsInFlight int
@@ -34,6 +39,8 @@ var errors []string = make([]string, 0)
 
 var galleryPattern *regexp.Regexp = regexp.MustCompile(
 	"/gallery/([0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z])")
+var picPattern *regexp.Regexp = regexp.MustCompile(
+	"/pic/([0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z])")
 
 func addError(msg string) {
 	errorMutex.Lock()
@@ -55,44 +62,76 @@ type LocalOperation int
 
 func NewLocalOperation() Operation {
 	opsMutex.Lock()
-	defer opsMutex.Unlock()
 	opsInFlight++
+	opsMutex.Unlock()
+	localOpGate <- true  // buffer-limited, may/should block
 	return LocalOperation(0)
 }
 
 func NewNetworkOperation() Operation {
 	opsMutex.Lock()
-	defer opsMutex.Unlock()
 	opsInFlight++
-	// Buffered channel, will block if too many in-flight.
+	opsMutex.Unlock()
         fetchGate <- true
 	return NetworkOperation(0)
 }
 
 func (o LocalOperation) Done() {
+	<-localOpGate
 	opsMutex.Lock()
         defer opsMutex.Unlock()
 	opsInFlight--
 }
 
 func (o NetworkOperation) Done() {
+	<-fetchGate
 	opsMutex.Lock()
         defer opsMutex.Unlock()
 	opsInFlight--
-	<-fetchGate
 }
 
-func AreOperationsInFlight() bool {
+func OperationsInFlight() int {
 	opsMutex.Lock()
         defer opsMutex.Unlock()
-	return opsInFlight > 0
+	return opsInFlight
+}
+
+func fetchUrlToFile(url, filename string) bool {
+	fi, statErr := os.Stat(filename)
+	if statErr == nil && fi.Size > 0 {
+		// TODO: re-fetch mode?
+		return true
+	}
+
+	netop := NewNetworkOperation()
+	defer netop.Done()
+
+	res, _, err := http.Get(url)
+	if err != nil {
+		addError(fmt.Sprintf("Error fetching %s: %v", url, err))
+		return false
+	}
+	defer res.Body.Close()
+
+	fileBytes, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		addError(fmt.Sprintf("Error reading XML from %s: %v", url, err))
+		return false
+	}
+
+	err = ioutil.WriteFile(filename, fileBytes, 0600)
+ 	if err != nil {
+		addError(fmt.Sprintf("Error writing file %s: %v", filename, err))
+		return false
+	}
+	return true
 }
 
 type Gallery struct {
 	key  string
 }
 
-func (g *Gallery) GalleryXmlUrl() string {
+func (g *Gallery) XmlUrl() string {
 	return fmt.Sprintf("%s/gallery/%s.xml", *flagBase, g.key)
 }
 
@@ -100,31 +139,33 @@ func (g *Gallery) Fetch(op Operation) {
 	defer op.Done()
 
 	galXmlFilename := fmt.Sprintf("%s/gallery-%s.xml", *flagDest, g.key)
-	fi, statErr := os.Stat(galXmlFilename)
-	if statErr != nil || fi.Size == 0 {
-		netop := NewNetworkOperation()
-		res, _, err := http.Get(g.GalleryXmlUrl())
-		if err != nil {
-			addError(fmt.Sprintf("Error fetching %s: %v", g.GalleryXmlUrl(), err))
-			return
-		}
-		defer res.Body.Close()
+	if fetchUrlToFile(g.XmlUrl(), galXmlFilename) {
+		go fetchPhotosInGallery(galXmlFilename, NewLocalOperation())
+	}
+}
 
-		galXml, err := ioutil.ReadAll(res.Body)
-		netop.Done()
-		if err != nil {
-			addError(fmt.Sprintf("Error reading XML from %s: %v", g.GalleryXmlUrl(), err))
-			return
-		}
+type Pic struct {
+	key  string
+}
 
-		err = ioutil.WriteFile(galXmlFilename, galXml, 0600)
- 		if err != nil {
-			addError(fmt.Sprintf("Error writing file %s: %v", galXmlFilename, err))
-			return
-		}
+func (p *Pic) XmlUrl() string {
+        return fmt.Sprintf("%s/pic/%s.xml", *flagBase, p.key)
+}
+
+func (p *Pic) BlobUrl() string {
+        return fmt.Sprintf("%s/pic/%s", *flagBase, p.key)
+}
+
+func (p *Pic) XmlBackupFilename() string {
+	return fmt.Sprintf("%s/pic-%s.xml", *flagDest, p.key)
+}
+
+func (p *Pic) Fetch(op Operation) {
+        defer op.Done()
+	if !fetchUrlToFile(p.XmlUrl(), p.XmlBackupFilename()) {
+		return
 	}
 	
-	go fetchPhotosInGallery(galXmlFilename, NewLocalOperation())
 }
 
 type DigestInfo struct {
@@ -197,9 +238,10 @@ func fetchPhotosInGallery(filename string, op Operation) {
 		noteGallery(url)
 	}
 
-	log.Printf("Parse of %s is: %q", filename, mediaSet)
+	//log.Printf("Parse of %s is: %q", filename, mediaSet)
 	for _, item := range mediaSet.MediaSetItems.MediaSetItem {
-		log.Printf("   pic: %s", item.InfoURL)
+		//log.Printf("   pic: %s", item.InfoURL)
+		notePhoto(item.InfoURL)
 	}
 }
 
@@ -209,20 +251,23 @@ func knownGalleries() int {
 	return len(galleryMap)
 }
 
-func noteGallery(keyOrUrl string) {
-	var key string
-
+func findKey(keyOrUrl string, pattern *regexp.Regexp) string {
 	if len(keyOrUrl) == 8 {
-		key = keyOrUrl
-	} else {
-		matches := galleryPattern.FindAllStringSubmatch(keyOrUrl, -1)
-		if len(matches) == 1 {
-			key = matches[0][1]
-		} else {
-			addError("Bogus noted gallery: " + key)
-			return
-		}
+		return keyOrUrl
 	}
+
+	matches := pattern.FindStringSubmatch(keyOrUrl)
+	if matches == nil {
+		panic("Failed to parse: " + keyOrUrl)
+	}
+	if len(matches[1]) != 8 {
+		panic("Expected match of 8 chars in " + keyOrUrl)
+	}
+	return matches[1]
+}
+
+func noteGallery(keyOrUrl string) {
+	key := findKey(keyOrUrl, galleryPattern)
 	galleryMutex.Lock()
 	defer galleryMutex.Unlock()
 	if _, known := galleryMap[key]; known {
@@ -230,9 +275,21 @@ func noteGallery(keyOrUrl string) {
 	}
 	gallery := &Gallery{key}
 	galleryMap[key] = gallery
+	log.Printf("Gallery: %s", gallery.XmlUrl())
+	go gallery.Fetch(NewLocalOperation())
+}
 
-	op := NewLocalOperation()
-	go gallery.Fetch(op)
+func notePhoto(keyOrUrl string) {
+	key := findKey(keyOrUrl, picPattern)
+	picMutex.Lock()
+	defer picMutex.Unlock()
+	if _, known := picMap[key]; known {
+		return
+	}
+	pic := &Pic{key}
+	picMap[key] = pic
+	log.Printf("Photo: %s", pic.XmlUrl())
+	go pic.Fetch(NewLocalOperation())
 }
 
 func fetchGalleryPage(page int) {
@@ -253,7 +310,6 @@ func fetchGalleryPage(page int) {
 	log.Printf("read %d bytes", len(html))
 
 	matches := galleryPattern.FindAllStringSubmatch(html, -1)
-	log.Printf("Matched: %q", matches)
 	for _, match := range matches {
 		noteGallery(match[1])
 	}
@@ -276,8 +332,12 @@ func main() {
 		page++
 	}
 
-	for AreOperationsInFlight() {
-		log.Printf("Operations in-flight.  Waiting.")
+	for {
+		n := OperationsInFlight()
+		if n == 0 {
+			break
+		}
+		log.Printf("%d Operations in-flight.  Waiting.", n)
 		time.Sleep(5 * 1e9)
 	}
 	log.Printf("Done.")
