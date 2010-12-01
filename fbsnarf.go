@@ -26,6 +26,9 @@ var galleryMap map[string]*Gallery = make(map[string]*Gallery)
 // Only allow 10 fetches at a time.
 var fetchGate chan bool = make(chan bool, 10)
 
+var opsMutex sync.Mutex
+var opsInFlight int
+
 var errorMutex sync.Mutex
 var errors []string = make([]string, 0)
 
@@ -43,13 +46,46 @@ func addError(msg string) {
 	}
 }
 
-func startFetch() {
-	// Buffered channel, will block if too many in-flight.
-	fetchGate <- true 
+type Operation interface {
+	Done()
 }
 
-func endFetch() {
+type NetworkOperation int
+type LocalOperation int
+
+func NewLocalOperation() Operation {
+	opsMutex.Lock()
+	defer opsMutex.Unlock()
+	opsInFlight++
+	return LocalOperation(0)
+}
+
+func NewNetworkOperation() Operation {
+	opsMutex.Lock()
+	defer opsMutex.Unlock()
+	opsInFlight++
+	// Buffered channel, will block if too many in-flight.
+        fetchGate <- true
+	return NetworkOperation(0)
+}
+
+func (o LocalOperation) Done() {
+	opsMutex.Lock()
+        defer opsMutex.Unlock()
+	opsInFlight--
+}
+
+func (o NetworkOperation) Done() {
+	opsMutex.Lock()
+        defer opsMutex.Unlock()
+	opsInFlight--
 	<-fetchGate
+}
+
+func AreOperationsInFlight() bool {
+	opsMutex.Lock()
+        defer opsMutex.Unlock()
+	return opsInFlight > 0
 }
 
 type Gallery struct {
@@ -60,13 +96,13 @@ func (g *Gallery) GalleryXmlUrl() string {
 	return fmt.Sprintf("%s/gallery/%s.xml", *flagBase, g.key)
 }
 
-func (g *Gallery) Fetch() {
-	startFetch()
-	defer endFetch()
+func (g *Gallery) Fetch(op Operation) {
+	defer op.Done()
 
 	galXmlFilename := fmt.Sprintf("%s/gallery-%s.xml", *flagDest, g.key)
 	fi, statErr := os.Stat(galXmlFilename)
 	if statErr != nil || fi.Size == 0 {
+		netop := NewNetworkOperation()
 		res, _, err := http.Get(g.GalleryXmlUrl())
 		if err != nil {
 			addError(fmt.Sprintf("Error fetching %s: %v", g.GalleryXmlUrl(), err))
@@ -75,6 +111,7 @@ func (g *Gallery) Fetch() {
 		defer res.Body.Close()
 
 		galXml, err := ioutil.ReadAll(res.Body)
+		netop.Done()
 		if err != nil {
 			addError(fmt.Sprintf("Error reading XML from %s: %v", g.GalleryXmlUrl(), err))
 			return
@@ -87,7 +124,7 @@ func (g *Gallery) Fetch() {
 		}
 	}
 	
-	fetchPhotosInGallery(galXmlFilename)
+	go fetchPhotosInGallery(galXmlFilename, NewLocalOperation())
 }
 
 type DigestInfo struct {
@@ -136,7 +173,9 @@ type MediaSet struct {
 	LinkedTo    LinkedToSet
 }
 
-func fetchPhotosInGallery(filename string) {
+func fetchPhotosInGallery(filename string, op Operation) {
+	defer op.Done()
+
 	f, err := os.Open(filename, os.O_RDONLY, 0)
 	if err != nil {
 		addError(fmt.Sprintf("Failed to open %s: %v", filename, err))
@@ -191,7 +230,9 @@ func noteGallery(keyOrUrl string) {
 	}
 	gallery := &Gallery{key}
 	galleryMap[key] = gallery
-	go gallery.Fetch()
+
+	op := NewLocalOperation()
+	go gallery.Fetch(op)
 }
 
 func fetchGalleryPage(page int) {
@@ -235,8 +276,8 @@ func main() {
 		page++
 	}
 
-	for len(fetchGate) > 0 {
-		log.Printf("Picture downloads in-flight.  Waiting.")
+	for AreOperationsInFlight() {
+		log.Printf("Operations in-flight.  Waiting.")
 		time.Sleep(5 * 1e9)
 	}
 	log.Printf("Done.")
