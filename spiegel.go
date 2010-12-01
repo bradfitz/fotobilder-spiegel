@@ -25,6 +25,8 @@ import (
 	"xml"
 )
 
+import _ "http/pprof"
+
 var flagBase *string = flag.String("base", "",
 	"e.g. http://www.picpix.com/username (no trailing slash)")
 
@@ -32,6 +34,9 @@ var flagDest *string = flag.String("dest", "", "Destination backup root")
 
 var flagSloppy *bool = flag.Bool("sloppy", false, "Continue on errors")
 var flagMaxNetwork *int = flag.Int("concurrency", 20, "Max concurrent requests")
+
+var flagProfile *string = flag.String("profile", "",
+	"the listen address to run a webserver for profiling; empty to leave disabled")
 
 var galleryMutex sync.Mutex
 var galleryMap map[string]*Gallery = make(map[string]*Gallery)
@@ -348,7 +353,6 @@ func fetchGalleryPage(page int) {
 
 func main() {
 	flag.Parse()
-	log.Printf("Starting.")
 
 	if *flagDest == "" {
 		log.Exitf("No --dest given.")
@@ -358,6 +362,13 @@ func main() {
 	}
 
 	networkOpGate = make(chan bool, *flagMaxNetwork)
+
+	log.Printf("Starting.")
+
+	if *flagProfile != "" {
+		log.Printf("Listening on http://%s", *flagProfile)
+		go http.ListenAndServe(*flagProfile, nil)
+	}
 
 	page := 1
 	for {
