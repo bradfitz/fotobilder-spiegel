@@ -1,0 +1,31 @@
+ABOUT
+=====
+
+This program intelligently mirrors an entire FotoBilder account (all
+galleries & pictures).  FotoBilder is the software the runs
+LiveJournal's photo galleries, and previously ran picpix.com, which is
+now apparently shutting down.
+
+This tool fetches public galleries & photos only when passwords
+aren't handy.
+
+If you have the passwords, you should probably use the fotoup.pl
+(found elsewhere) and its --backup mode, which uses the authenticated
+fotobilder API.
+
+
+INSTALLING
+==========
+
+* Install Go (from http://golang.org/)
+
+$ export GOROOT=/path/to/your/go/root
+$ make
+$ ./spiegel --help
+
+Usage of ./spiegel:
+  -base="": e.g. http://www.picpix.com/username (no trailing slash)
+  -concurrency=20: Max concurrent requests
+  -dest="": Destination backup root
+  -sloppy=false: Continue on errors
+

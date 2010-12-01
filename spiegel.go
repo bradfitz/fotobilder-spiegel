@@ -25,10 +25,10 @@ import (
 	"xml"
 )
 
-var flagBase *string = flag.String("base", "http://www.picpix.com/kelly",
+var flagBase *string = flag.String("base", "",
 	"e.g. http://www.picpix.com/username (no trailing slash)")
 
-var flagDest *string = flag.String("dest", "/home/bradfitz/backup/picpix/kelly", "Destination backup root")
+var flagDest *string = flag.String("dest", "", "Destination backup root")
 
 var flagSloppy *bool = flag.Bool("sloppy", false, "Continue on errors")
 var flagMaxNetwork *int = flag.Int("concurrency", 20, "Max concurrent requests")
@@ -349,6 +349,13 @@ func fetchGalleryPage(page int) {
 func main() {
 	flag.Parse()
 	log.Printf("Starting.")
+
+	if *flagDest == "" {
+		log.Exitf("No --dest given.")
+	}
+	if *flagBase == "" {
+		log.Exitf("No --base URL given.")
+	}
 
 	networkOpGate = make(chan bool, *flagMaxNetwork)
 
