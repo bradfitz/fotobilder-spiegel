@@ -342,12 +342,11 @@ func fetchGalleryPage(page int) {
 	}
 	res.Body.Close()
 
-	html := string(htmlBytes)
-	log.Printf("read %d bytes", len(html))
+	log.Printf("read %d bytes", len(htmlBytes))
 
-	matches := galleryPattern.FindAllStringSubmatch(html, -1)
+	matches := galleryPattern.FindAllSubmatch(htmlBytes, -1)
 	for _, match := range matches {
-		noteGallery(match[1])
+		noteGallery(string(match[1]))
 	}
 }
 
